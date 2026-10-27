@@ -95,6 +95,8 @@ class CSIDataset(Dataset):
                     cache.pop(next(iter(cache)))
             else:
                 cache[path_key] = loaded_windows
+        
+        x = torch.from_numpy(cache[path_key][local_idx].copy())
 
         # ADD THIS LINE: Keep only channel 0 (Amplitude), drop channel 1 (Phase)
         x = x[0:1, :, :] 
