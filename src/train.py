@@ -336,7 +336,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # Scheduler decays learning rate when validation plateaus
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=4, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=4)
     scaler = torch.amp.GradScaler('cuda') if device.type == "cuda" else None
 
     best_val_f1, best_state, epochs_without_improvement = -1.0, None, 0
