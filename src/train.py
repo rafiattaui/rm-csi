@@ -229,32 +229,42 @@ def evaluate(model, loader, criterion, device):
     correct = 0
     total = 0
     class_count = 20
-    tp = np.zeros(class_count, dtype=np.int64)
-    fp = np.zeros(class_count, dtype=np.int64)
-    fn = np.zeros(class_count, dtype=np.int64)
-    confusion = np.zeros((class_count, class_count), dtype=np.int64)
+    
+    # Keep confusion matrix on device to avoid batch-by-batch CPU syncs
+    confusion = torch.zeros((class_count, class_count), dtype=torch.int64, device=device)
+    
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             logits = model(x)
             loss = criterion(logits, y)
+            
             batch_size = y.size(0)
             loss_sum += loss.item() * batch_size
             pred = logits.argmax(dim=1)
             correct += (pred == y).sum().item()
             total += batch_size
-            for c in range(class_count):
-                tp[c] += ((pred == c) & (y == c)).sum().item()
-                fp[c] += ((pred == c) & (y != c)).sum().item()
-                fn[c] += ((pred != c) & (y == c)).sum().item()
-            flat = (y * class_count + pred).detach().cpu().numpy()
-            confusion += np.bincount(flat, minlength=class_count * class_count).reshape(class_count, class_count)
+            
+            # Accumulate confusion matrix efficiently on GPU
+            indices = y * class_count + pred
+            confusion += torch.bincount(indices, minlength=class_count**2).view(class_count, class_count)
+            
+    # Move to CPU once at the end
+    confusion = confusion.cpu().numpy()
+    
+    tp = np.diag(confusion)
+    fp = confusion.sum(axis=0) - tp
+    fn = confusion.sum(axis=1) - tp
+    
     precision = tp / np.maximum(tp + fp, 1)
     recall = tp / np.maximum(tp + fn, 1)
     f1 = 2 * precision * recall / np.maximum(precision + recall, 1e-12)
-    present = (tp + fn) > 0
+    
+    # Fix: penalize false positives even if the class is not in the ground truth
+    present = (tp + fp + fn) > 0 
     macro_f1 = float(f1[present].mean()) if present.any() else 0.0
+    
     return loss_sum / max(total, 1), correct / max(total, 1), macro_f1, confusion, precision, recall, f1
 
 def main():
@@ -378,6 +388,8 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    scaler = torch.amp.GradScaler('cuda') if device.type == "cuda" else None
+
     print("Starting training loop...", flush=True)
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -397,10 +409,18 @@ def main():
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            logits = model(x)
-            loss = criterion(logits, y)
-            loss.backward()
-            optimizer.step()
+            if scaler is not None:
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    logits = model(x)
+                    loss = criterion(logits, y)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                logits = model(x)
+                loss = criterion(logits, y)
+                loss.backward()
+                optimizer.step()
             batch_size_now = y.size(0)
             running_loss += loss.item() * batch_size_now
             correct += (logits.argmax(dim=1) == y).sum().item()
