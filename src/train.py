@@ -281,13 +281,16 @@ def prepare_datasets(args, device):
     
     train_paths, val_paths = split_train_val_recordings(all_data.samples, train_subjects, val_fraction=args.val_fraction, seed=args.seed)
     
-    # Instantiate optimized subsets without rescanning
-    def filter_samples(paths): return [s for s in all_data.samples if str(s["path"]) in paths]
-    test_paths = [str(s["path"]) for s in all_data.samples if s["subject"] in test_subjects]
+    # Fix: Convert path lists to sets of strings for accurate matching
+    train_paths_set = set(str(p) for p in train_paths)
+    val_paths_set = set(str(p) for p in val_paths)
+    test_paths_set = set(str(s["path"]) for s in all_data.samples if s["subject"] in test_subjects)
     
-    train_ds = CSIDataset(args.data_dir, samples=filter_samples(train_paths), cache_recordings=args.cache_recordings)
-    val_ds = CSIDataset(args.data_dir, samples=filter_samples(val_paths), cache_recordings=args.cache_recordings)
-    test_ds = CSIDataset(args.data_dir, samples=filter_samples(test_paths), cache_recordings=args.cache_recordings)
+    def filter_samples(paths_set): return [s for s in all_data.samples if str(s["path"]) in paths_set]
+    
+    train_ds = CSIDataset(args.data_dir, samples=filter_samples(train_paths_set), cache_recordings=args.cache_recordings)
+    val_ds = CSIDataset(args.data_dir, samples=filter_samples(val_paths_set), cache_recordings=args.cache_recordings)
+    test_ds = CSIDataset(args.data_dir, samples=filter_samples(test_paths_set), cache_recordings=args.cache_recordings)
     
     return train_ds, val_ds, test_ds, train_subjects, None, test_subjects, "recording-level split within training subjects"
 
