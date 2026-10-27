@@ -96,7 +96,9 @@ class CSIDataset(Dataset):
             else:
                 cache[path_key] = loaded_windows
 
-        x = torch.from_numpy(cache[path_key][local_idx].copy())
+        # ADD THIS LINE: Keep only channel 0 (Amplitude), drop channel 1 (Phase)
+        x = x[0:1, :, :] 
+        
         if self.cache_recordings == 0:
             cache.pop(path_key, None)
             
@@ -114,7 +116,7 @@ class SmallCSI2DCNN(nn.Module):
     def __init__(self, num_classes=20, dropout=0.3):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(2, 32, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(1, 32, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2),
@@ -187,10 +189,12 @@ def split_train_val_recordings(samples, train_subjects, val_fraction=0.15, seed=
 
 
 def compute_train_normalization(dataset):
-    sums, sums_sq, count = np.zeros(2, dtype=np.float64), np.zeros(2, dtype=np.float64), 0
+    # CHANGE: Arrays initialized to size 1 instead of 2
+    sums, sums_sq, count = np.zeros(1, dtype=np.float64), np.zeros(1, dtype=np.float64), 0
     for sample in dataset.samples:
         with np.load(sample["path"], allow_pickle=False) as d:
-            x = np.asarray(d["windows"], dtype=np.float32)
+            # CHANGE: Slice the numpy array immediately to only look at Amplitude
+            x = np.asarray(d["windows"][:, 0:1, :, :], dtype=np.float32)
         if x.size == 0: continue
         sums += x.sum(axis=(0, 2, 3), dtype=np.float64)
         sums_sq += np.square(x, dtype=np.float64).sum(axis=(0, 2, 3), dtype=np.float64)
@@ -198,8 +202,10 @@ def compute_train_normalization(dataset):
         
     mean = sums / count
     std = np.sqrt(np.maximum(sums_sq / count - mean * mean, 1e-12))
-    return (torch.tensor(mean, dtype=torch.float32).view(2, 1, 1),
-            torch.tensor(std, dtype=torch.float32).view(2, 1, 1))
+    
+    # CHANGE: Reshape to (1, 1, 1) instead of (2, 1, 1)
+    return (torch.tensor(mean, dtype=torch.float32).view(1, 1, 1),
+            torch.tensor(std, dtype=torch.float32).view(1, 1, 1))
 
 
 def evaluate(model, loader, criterion, device):
@@ -337,7 +343,7 @@ def main():
     
     # Scheduler decays learning rate when validation plateaus
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=4)
-    scaler = torch.amp.GradScaler('cuda') if device.type == "cuda" else None
+    scaler = None # torch.amp.GradScaler('cuda') if device.type == "cuda" else None
 
     best_val_f1, best_state, epochs_without_improvement = -1.0, None, 0
     output_path = Path(args.output)
