@@ -102,9 +102,6 @@ class CSIDataset(Dataset):
         if path_key not in cache:
             with np.load(sample["path"], allow_pickle=False) as d:
                 cache[path_key] = d["windows"].astype(np.float32, copy=True)
-            # Bound memory use; simple FIFO eviction.
-            if len(cache) > 2:
-                cache.pop(next(iter(cache)))
 
         x = torch.from_numpy(cache[path_key][local_idx])
         y = torch.tensor(sample["activity_id"], dtype=torch.long)
