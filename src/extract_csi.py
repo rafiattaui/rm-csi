@@ -33,7 +33,8 @@ Added on top of the MATLAB script
   * labels parsed from the file name (X_D_YY_ZZ, e.g. D_1_M1_P2) and a
     manifest.csv.
 
-Keys saved: csi (N, n_sub) complex, seq_num, core_num, css, activity,
+Keys saved: csi (N, n_sub) complex, ts (capture time in seconds from the first
+kept frame, from the pcap record headers), seq_num, core_num, css, activity,
 activity_id, day, device, subject.
 """
 import argparse
@@ -67,7 +68,7 @@ ACTIVITIES = {
 NAME_RE = re.compile(r"^([A-T])_(\d+)_(M\d+)_P(\d+)")
 MANIFEST_FIELDS = [
     "file", "npz", "status", "activity", "activity_id", "day", "device",
-    "subject", "packets", "frames", "subcarriers", "seq_dup_frac",
+    "subject", "packets", "frames", "subcarriers", "fs_est_hz", "seq_dup_frac",
     "css_values", "message",
 ]
 
@@ -102,7 +103,8 @@ def non_zero_indices(bw: int) -> np.ndarray:
 def scan_pcap(path, frame_len: int, max_packets: int):
     """
     Walk the pcap records. Returns (byte buffer, offsets of the frames whose
-    length equals frame_len, number of records read, Counter of record lengths).
+    length equals frame_len, their capture times in seconds from the first of
+    them, number of records read, Counter of record lengths).
     """
     data = Path(path).read_bytes()
     if len(data) < 24:
@@ -117,12 +119,13 @@ def scan_pcap(path, frame_len: int, max_packets: int):
     else:
         raise ValueError("not a pcap file (bad magic number)")
 
-    rec = struct.Struct(endian + "IIII")   # ts_sec, ts_usec, incl_len, orig_len
+    ns_per_tick = 1 if magic in (b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d") else 1000   # ns or us pcap
+    rec = struct.Struct(endian + "IIII")   # ts_sec, ts_frac, incl_len, orig_len
     size = len(data)
     pos, n_packets = 24, 0
-    offsets, lengths = [], Counter()
+    offsets, stamps, lengths = [], [], Counter()
     while pos + 16 <= size and n_packets < max_packets:
-        _, _, incl, orig = rec.unpack_from(data, pos)
+        ts_sec, ts_frac, incl, orig = rec.unpack_from(data, pos)
         pos += 16
         if pos + incl > size:              # truncated last record
             break
@@ -130,8 +133,13 @@ def scan_pcap(path, frame_len: int, max_packets: int):
         lengths[orig] += 1
         if orig == frame_len and incl == frame_len:
             offsets.append(pos)
+            stamps.append(ts_sec * 1_000_000_000 + ts_frac * ns_per_tick)   # exact integer ns
         pos += incl
-    return np.frombuffer(data, dtype=np.uint8), np.array(offsets, dtype=np.int64), n_packets, lengths
+    if stamps:
+        ts = (np.array(stamps, dtype=np.int64) - stamps[0]) * 1e-9
+    else:
+        ts = np.empty(0, dtype=np.float64)
+    return np.frombuffer(data, dtype=np.uint8), np.array(offsets, dtype=np.int64), ts, n_packets, lengths
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +262,7 @@ def extract_one(args):
         row.update(labels)
 
         frame_len = 4 * HEADER_WORDS + 4 * round(bw * 3.2)
-        buf, offsets, n_packets, lengths = scan_pcap(pcap_path, frame_len, max_packets)
+        buf, offsets, ts, n_packets, lengths = scan_pcap(pcap_path, frame_len, max_packets)
         row["packets"] = n_packets
         if len(offsets) == 0:
             common = ", ".join(f"{l} B x{c}" for l, c in lengths.most_common(3)) or "none"
@@ -291,6 +299,7 @@ def extract_one(args):
         np.savez_compressed(
             out_path,
             csi=csi,
+            ts=ts,
             seq_num=seq,
             core_num=core,
             css=css,
@@ -300,10 +309,14 @@ def extract_one(args):
             device=np.array(labels["device"]),
             subject=np.int16(labels["subject"]),
         )
+        dts = np.diff(ts)
+        dts = dts[dts > 0]
+        fs_est = 1.0 / float(np.median(dts)) if len(dts) else 0.0   # frames/s over all streams
         row.update(
             status="warning" if notes else "ok",
             frames=n_frames,
             subcarriers=n_sub,
+            fs_est_hz=f"{fs_est:.1f}",
             seq_dup_frac=f"{dup_frac:.4f}",
             css_values="|".join(f"0x{v:04x}" for v in css_values),
             message="; ".join(notes),
@@ -349,7 +362,8 @@ def main():
             row = fut.result()
             rows.append(row)
             tag = {"ok": "OK     ", "warning": "WARNING", "failed": "FAILED "}[row["status"]]
-            detail = f"{row['frames']} x {row['subcarriers']}" if row["status"] != "failed" else ""
+            detail = (f"{row['frames']} x {row['subcarriers']} (~{row['fs_est_hz']} frames/s)"
+                      if row["status"] != "failed" else "")
             print(f"[{tag}] {row['file']} {detail} {row['message']}".rstrip())
 
     rows.sort(key=lambda r: r["file"])
