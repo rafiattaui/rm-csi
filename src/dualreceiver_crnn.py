@@ -199,17 +199,19 @@ def split_train_val_recordings(samples, train_subjects, val_fraction=0.15, seed=
     rng = random.Random(seed)
     candidates = [s for s in samples if s["subject"] in set(train_subjects)]
     by_activity = {}
-    for sample in candidates: by_activity.setdefault(sample["activity_id"], []).append(sample)
+    for sample in candidates: 
+        by_activity.setdefault(sample["activity_id"], []).append(sample)
         
     val_paths = set()
     for group in by_activity.values():
         if len(group) < 2: continue
         rng.shuffle(group)
         n_val = max(1, min(int(round(len(group) * val_fraction)), len(group) - 1))
-        val_paths.update(str(s["path"]) for s in group[:n_val])
+        # Updated to use 'm1_path' as the unique ID for the pair
+        val_paths.update(str(s["m1_path"]) for s in group[:n_val])
         
-    train_paths = [s["path"] for s in candidates if str(s["path"]) not in val_paths]
-    val_paths = [s["path"] for s in candidates if str(s["path"]) in val_paths]
+    train_paths = [s["m1_path"] for s in candidates if str(s["m1_path"]) not in val_paths]
+    val_paths = [s["m1_path"] for s in candidates if str(s["m1_path"]) in val_paths]
     return train_paths, val_paths
 
 def compute_train_normalization(dataset):
@@ -288,7 +290,8 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, num_epochs):
     return running_loss / total, correct / total
 
 def prepare_datasets(args, device):
-    all_data = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, device=device, activities=parse_int_list(args.activities))
+    # Removed the unsupported 'device=device' argument
+    all_data = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, activities=parse_int_list(args.activities))
     all_subjects = sorted({s["subject"] for s in all_data.samples})
     
     test_subjects = parse_int_list(args.test_subjects) or [all_subjects[-1]]
@@ -298,9 +301,9 @@ def prepare_datasets(args, device):
     
     train_paths_set = set(str(p) for p in train_paths)
     val_paths_set = set(str(p) for p in val_paths)
-    test_paths_set = set(str(s["path"]) for s in all_data.samples if s["subject"] in test_subjects)
+    test_paths_set = set(str(s["m1_path"]) for s in all_data.samples if s["subject"] in test_subjects)
     
-    def filter_samples(paths_set): return [s for s in all_data.samples if str(s["path"]) in paths_set]
+    def filter_samples(paths_set): return [s for s in all_data.samples if str(s["m1_path"]) in paths_set]
     
     train_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=filter_samples(train_paths_set), cache_recordings=args.cache_recordings, is_train=True)
     val_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=filter_samples(val_paths_set), cache_recordings=args.cache_recordings, is_train=False)
