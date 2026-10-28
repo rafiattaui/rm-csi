@@ -339,6 +339,28 @@ def block_split(n, rng, block=20, gap=1, frac_val=0.15, frac_test=0.15):
     return [np.array(o, dtype=np.int64) for o in out]
 
 
+def time_split(path, gap=1, frac_val=0.15, frac_test=0.15):
+    """
+    Forward-in-time split of ONE recording: the first part of the capture is train,
+    the next part val, the last part test. Done per core/stream (the 'stream' key),
+    because windows of different streams are stored one stream after another.
+    `gap` windows are dropped at each boundary since neighbouring windows overlap.
+    """
+    with np.load(path, allow_pickle=False) as d:
+        stream, t_start = d["stream"], d["t_start"]
+    out = [[], [], []]
+    for v in np.unique(stream):
+        ids = np.flatnonzero(stream == v)
+        ids = ids[np.argsort(t_start[ids], kind="stable")]
+        n = len(ids)
+        n_val, n_test = int(n * frac_val), int(n * frac_test)
+        n_train = n - n_val - n_test
+        out[0].extend(ids[:n_train])
+        out[1].extend(ids[n_train + gap:n_train + n_val])
+        out[2].extend(ids[n_train + n_val + gap:])
+    return [np.sort(np.array(o, dtype=np.int64)) for o in out]
+
+
 def prepare_datasets(args):
     all_data = SingleReceiverCSIDataset(args.data_dir, activities=parse_int_list(args.activities),
                                         channel=args.channel)
@@ -362,7 +384,17 @@ def prepare_datasets(args):
         mode = f"Cross-subject (train {train_subs} | val {val_subs} | test {test_subs})"
     else:
         rng = random.Random(args.seed)
-        if args.recording_split:
+        if args.time_split:
+            # Forward-in-time split: first 70% of every recording trains, next 15% validates,
+            # last 15% tests. Every class is in all three sets, and test is the later part.
+            train_samples, val_samples, test_samples = [], [], []
+            for s in samples:
+                parts = time_split(s["path"], args.gap)
+                for out, idx in zip((train_samples, val_samples, test_samples), parts):
+                    if len(idx):
+                        out.append({**s, "idx": idx, "n_windows": len(idx)})
+            mode = f"Forward-in-time split (first 70% train | next 15% val | last 15% test, {args.gap}-window gap)"
+        elif args.recording_split:
             # Old behaviour: random recording-level split (whole recordings held out)
             rng.shuffle(samples)
             n_train = max(1, int(len(samples) * 0.70))
@@ -409,6 +441,8 @@ def main():
     parser.add_argument("--val-subjects", default=None, help="Comma-separated subject IDs for validation (cross-subject mode).")
     parser.add_argument("--recording-split", action="store_true",
                         help="Hold out whole recordings instead of the default window-level block split.")
+    parser.add_argument("--time-split", action="store_true",
+                        help="Forward-in-time split inside each recording (train on the start, test on the end).")
     parser.add_argument("--demean", action="store_true",
                         help="Subtract each window's mean over time (motion-only input, no static level).")
     parser.add_argument("--block", type=int, default=20, help="Windows per block in the window-level split.")
