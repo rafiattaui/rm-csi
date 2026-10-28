@@ -163,10 +163,10 @@ class SingleReceiverCNN(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):                              # x: (B, 1, T, F)
-        f = self.features(x)
-        f = self.pool(f).flatten(1)                    # (B, 8*width)
-        return self.classifier(f)
+    def forward(self, x):                       # x: (B, 2, T, F)
+        f = self.features(x)                    # (B, 8w, T', F')
+        f = self.pool(f).squeeze(3)             # (B, 8w, T')  frequency averaged, time kept
+        return self.temporal_classifier(f)      # Conv1d over time -> pool -> linear -> (B, classes)
 
 
 # ----------------------------------------------------------------------------
