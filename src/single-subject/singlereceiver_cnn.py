@@ -85,6 +85,8 @@ class SingleReceiverCSIDataset(Dataset):
         prev = 0 if file_idx == 0 else int(self.cumulative[file_idx - 1])
         local_idx = index - prev
         sample = self.samples[file_idx]
+        if sample.get("idx") is not None:          # window-level split: map to the real window index
+            local_idx = int(sample["idx"][local_idx])
 
         if not hasattr(self, "_cache"):
             self._cache = {}
@@ -174,13 +176,11 @@ class SingleReceiverCNN(nn.Module):
 # ----------------------------------------------------------------------------
 
 def parse_int_list(value):
+    """Accepts ids (0,3,7) or activity letters (A,D,H)."""
     if not value:
         return None
-    out = []
-    for p in value.split(","):
-        p = p.strip()
-        out.append(int(p) if p.isdigit() else ord(p.upper()) - ord("A"))
-    return out
+    return [int(p) if p.strip().isdigit() else ord(p.strip().upper()) - ord("A")
+            for p in value.split(",")]
 
 
 def set_seed(seed):
@@ -212,7 +212,10 @@ def compute_train_normalization(dataset):
     for sample in dataset.samples:
         with np.load(sample["path"], allow_pickle=False) as d:
             # d["windows"] shape: (N_windows, 2, T, F)
-            x = d["windows"][:, ch_slice].astype(np.float64)
+            w = d["windows"]
+            if sample.get("idx") is not None:
+                w = w[sample["idx"]]
+            x = w[:, ch_slice].astype(np.float64)
 
         if x.size == 0:
             continue
@@ -301,6 +304,35 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, num_epochs):
     return running_loss / total, correct / total
 
 
+def block_split(n, rng, block=20, gap=1, frac_val=0.15, frac_test=0.15):
+    """
+    Split window indices 0..n-1 of ONE recording into train/val/test.
+    Windows are grouped into contiguous blocks; whole blocks go to one split.
+    Windows overlap (50% by default), so `gap` windows are dropped at every edge
+    where neighbouring blocks belong to different splits. That keeps the same
+    samples out of both train and test.
+    """
+    n_blocks = int(np.ceil(n / block))
+    order = list(range(n_blocks))
+    rng.shuffle(order)
+    n_val = max(1, round(n_blocks * frac_val)) if n_blocks >= 3 else 0
+    n_test = max(1, round(n_blocks * frac_test)) if n_blocks >= 3 else 0
+    assign = {}
+    for k, b in enumerate(order):
+        assign[b] = 1 if k < n_val else 2 if k < n_val + n_test else 0   # 0 train, 1 val, 2 test
+
+    out = [[], [], []]
+    for b in range(n_blocks):
+        lo, hi = b * block, min(n, (b + 1) * block)
+        if b > 0 and assign[b - 1] != assign[b]:
+            lo += gap
+        if b < n_blocks - 1 and assign[b + 1] != assign[b]:
+            hi -= gap
+        if hi > lo:
+            out[assign[b]].extend(range(lo, hi))
+    return [np.array(o, dtype=np.int64) for o in out]
+
+
 def prepare_datasets(args):
     all_data = SingleReceiverCSIDataset(args.data_dir, activities=parse_int_list(args.activities),
                                         channel=args.channel)
@@ -323,19 +355,37 @@ def prepare_datasets(args):
         test_samples = [s for s in samples if s["subject"] in test_subs]
         mode = f"Cross-subject (train {train_subs} | val {val_subs} | test {test_subs})"
     else:
-        # Within-subject: random recording-level split
         rng = random.Random(args.seed)
-        rng.shuffle(samples)
-        n_train = max(1, int(len(samples) * 0.70))
-        n_val = max(1, int(len(samples) * 0.15))
-        train_samples = samples[:n_train]
-        val_samples = samples[n_train:n_train + n_val]
-        test_samples = samples[n_train + n_val:]
-        if not val_samples and len(train_samples) > 1:
-            val_samples.append(train_samples.pop())
-        if not test_samples and len(train_samples) > 1:
-            test_samples.append(train_samples.pop())
-        mode = "Within-subject (random recording-level split)"
+        if args.recording_split:
+            # Old behaviour: random recording-level split (whole recordings held out)
+            rng.shuffle(samples)
+            n_train = max(1, int(len(samples) * 0.70))
+            n_val = max(1, int(len(samples) * 0.15))
+            train_samples = samples[:n_train]
+            val_samples = samples[n_train:n_train + n_val]
+            test_samples = samples[n_train + n_val:]
+            if not val_samples and len(train_samples) > 1:
+                val_samples.append(train_samples.pop())
+            if not test_samples and len(train_samples) > 1:
+                test_samples.append(train_samples.pop())
+            mode = "Within-subject (random recording-level split)"
+        else:
+            # Window-level split: EVERY recording contributes to train, val and test,
+            # so every class is seen in all three sets.
+            train_samples, val_samples, test_samples = [], [], []
+            for s in samples:
+                parts = block_split(s["n_windows"], rng, args.block, args.gap)
+                for out, idx in zip((train_samples, val_samples, test_samples), parts):
+                    if len(idx):
+                        out.append({**s, "idx": idx, "n_windows": len(idx)})
+            mode = (f"Within-recording block split (blocks of {args.block} windows, "
+                    f"{args.gap}-window gap at split edges)")
+
+    for name, group in (("train", train_samples), ("val", val_samples), ("test", test_samples)):
+        counts = {}
+        for s in group:
+            counts[s["activity_id"]] = counts.get(s["activity_id"], 0) + s["n_windows"]
+        print(f"{name:5s} windows per class: {dict(sorted(counts.items()))}")
 
     def build(s, train):
         return SingleReceiverCSIDataset(args.data_dir, samples=s, cache_recordings=args.cache_recordings,
@@ -351,6 +401,10 @@ def main():
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--test-subjects", default=None, help="Comma-separated subject IDs to hold out for testing (cross-subject).")
     parser.add_argument("--val-subjects", default=None, help="Comma-separated subject IDs for validation (cross-subject mode).")
+    parser.add_argument("--recording-split", action="store_true",
+                        help="Hold out whole recordings instead of the default window-level block split.")
+    parser.add_argument("--block", type=int, default=20, help="Windows per block in the window-level split.")
+    parser.add_argument("--gap", type=int, default=1, help="Windows dropped at split edges (overlap guard).")
     parser.add_argument("--cache-recordings", type=int, default=10000)
     parser.add_argument("--patience", type=int, default=12)
     parser.add_argument("--activities", default=None)
