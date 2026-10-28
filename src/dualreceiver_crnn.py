@@ -288,7 +288,7 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, num_epochs):
     return running_loss / total, correct / total
 
 def prepare_datasets(args, device):
-    all_data = DualReceiverCSIDataset(args.data_dir, device=args.csi_device, activities=parse_int_list(args.activities))
+    all_data = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, device=args.csi_device, activities=parse_int_list(args.activities))
     all_subjects = sorted({s["subject"] for s in all_data.samples})
     
     test_subjects = parse_int_list(args.test_subjects) or [all_subjects[-1]]
@@ -302,16 +302,17 @@ def prepare_datasets(args, device):
     
     def filter_samples(paths_set): return [s for s in all_data.samples if str(s["path"]) in paths_set]
     
-    train_ds = DualReceiverCSIDataset(args.data_dir, samples=filter_samples(train_paths_set), cache_recordings=args.cache_recordings, is_train=True)
-    val_ds = DualReceiverCSIDataset(args.data_dir, samples=filter_samples(val_paths_set), cache_recordings=args.cache_recordings, is_train=False)
-    test_ds = DualReceiverCSIDataset(args.data_dir, samples=filter_samples(test_paths_set), cache_recordings=args.cache_recordings, is_train=False)
+    train_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=filter_samples(train_paths_set), cache_recordings=args.cache_recordings, is_train=True)
+    val_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=filter_samples(val_paths_set), cache_recordings=args.cache_recordings, is_train=False)
+    test_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=filter_samples(test_paths_set), cache_recordings=args.cache_recordings, is_train=False)
     
     return train_ds, val_ds, test_ds, train_subjects, None, test_subjects, "recording-level split within training subjects"
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--m1-dir", required=True)
+    parser.add_argument("--m2-dir", required=True)
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--csi-device", default="M1")
     parser.add_argument("--test-subjects", default=None)
