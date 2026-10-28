@@ -47,9 +47,14 @@ class DualReceiverCSIDataset(Dataset):
         paired_samples = []
         
         for m1_path in m1_files:
-            # Find the equivalent M2 path by swapping 'M1' with 'M2' in the path string
-            m2_path = Path(str(m1_path).replace(str(self.m1_root), str(self.m2_root)))
+            # 1. Swap the directory root from M1 to M2
+            m2_path_str = str(m1_path).replace(str(self.m1_root), str(self.m2_root))
+            # 2. Swap the device tag in the filename itself (e.g., A_1_M1_P1 -> A_1_M2_P1)
+            m2_path_str = m2_path_str.replace("_M1_", "_M2_")
+            m2_path = Path(m2_path_str)
+            
             if not m2_path.exists():
+                print(f"Skipping (Missing M2 Pair): {m2_path.name}")
                 continue # Skip if M2 recording is missing for this file
 
             with np.load(m1_path, allow_pickle=False) as d1, np.load(m2_path, allow_pickle=False) as d2:
