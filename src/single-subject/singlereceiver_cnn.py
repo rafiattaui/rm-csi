@@ -29,12 +29,13 @@ NUM_CLASSES = 20
 class SingleReceiverCSIDataset(Dataset):
     """Loads preprocessed CSI windows from a single receiver."""
 
-    def __init__(self, root, activities=None, samples=None, cache_recordings=2, is_train=False, channel=0):
+    def __init__(self, root, activities=None, samples=None, cache_recordings=2, is_train=False, channel=0, use_both_channels=True):
         self.root = Path(root)
         self.cache_recordings = max(0, int(cache_recordings))
         self.normalization = None
         self.is_train = is_train
         self.channel = int(channel)
+        self.use_both_channels = use_both_channels
 
         if samples is not None:
             self.samples = samples
@@ -90,17 +91,21 @@ class SingleReceiverCSIDataset(Dataset):
 
         windows = self._load(sample["path"])
 
+        if self.use_both_channels:
+            x = torch.from_numpy(windows[local_idx, :2].copy())  # Shape: (2, T, F)
+        else:
+            x = torch.from_numpy(windows[local_idx, self.channel:self.channel + 1].copy())  # Shape: (1, T, F)
+
         if self.cache_recordings > 0 and len(self._cache) > self.cache_recordings:
             self._cache.pop(next(iter(self._cache)))
 
-        # Selected channel (default 0 = amplitude) -> (1, T, F)
-        x = torch.from_numpy(windows[local_idx, self.channel:self.channel + 1].copy())
-
         if self.normalization is not None:
-            mean, std = self.normalization
-            x = (x - mean) / std
+            mean, std = self.normalization  # Shapes: (1, C, 1, F)
+            # Squeezing dim 0 gives (C, 1, F), which broadcasts over (C, T, F)
+            x = (x - mean.squeeze(0)) / std.squeeze(0)
 
         if self.is_train:
+            # Data augmentations
             if random.random() < 0.5:
                 x += torch.randn_like(x) * 0.05
             if random.random() < 0.5:
@@ -134,14 +139,19 @@ class SingleReceiverCNN(nn.Module):
     def __init__(self, num_classes=NUM_CLASSES, dropout=0.3, width=32):
         super().__init__()
         self.features = nn.Sequential(
-            conv_block(1, width),                      # (B, w,  T/2, F/2)
+            conv_block(2, width),                      # (B, w,  T/2, F/2)
             conv_block(width, width * 4),              # (B, 4w, T/4, F/4)
             conv_block(width * 4, width * 8, pool=False),
         )
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Sequential(
+        self.freq_pool = nn.AdaptiveAvgPool2d((None, 1))
+        self.temporal_classifier = nn.Sequential(
+            nn.Conv1d(width * 8, width * 4, kernel_size=5, padding=2),
+            nn.BatchNorm1d(width * 4),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1), # Pool time only AFTER temporal feature extraction
+            nn.Flatten(),
             nn.Dropout(dropout),
-            nn.Linear(width * 8, num_classes),
+            nn.Linear(width * 4, num_classes)
         )
         self._initialize_weights()
 
@@ -182,21 +192,52 @@ def make_loader(dataset, batch_size, shuffle, num_workers, pin_memory):
 
 
 def compute_train_normalization(dataset):
-    total, total_sq, count = 0.0, 0.0, 0
-    c = dataset.channel
+    """
+    Computes per-channel, per-subcarrier mean and std across training windows.
+    Returns tensors of shape (1, C, 1, F) for broadcasting across (B, C, T, F).
+    """
+    total = None      # Accumulator for sums, shape (1, C, 1, F)
+    total_sq = None   # Accumulator for squared sums, shape (1, C, 1, F)
+    total_frames = 0  # Accumulator for total frames (N * T)
+
+    # Determine channel slice based on dataset settings (e.g., both channels :2 or single channel)
+    ch_slice = slice(0, 2) if getattr(dataset, "use_both_channels", False) else slice(dataset.channel, dataset.channel + 1)
+
     for sample in dataset.samples:
         with np.load(sample["path"], allow_pickle=False) as d:
-            x = np.asarray(d["windows"][:, c:c + 1], dtype=np.float32)
+            # d["windows"] shape: (N_windows, 2, T, F)
+            x = d["windows"][:, ch_slice].astype(np.float64)
+
         if x.size == 0:
             continue
-        total += float(x.sum(dtype=np.float64))
-        total_sq += float(np.square(x, dtype=np.float64).sum())
-        count += x.size
 
-    mean = total / count
-    std = max(np.sqrt(max(total_sq / count - mean * mean, 1e-12)), 1e-6)
-    return (torch.tensor(mean, dtype=torch.float32).view(1, 1, 1),
-            torch.tensor(std, dtype=torch.float32).view(1, 1, 1))
+        # Sum across sample windows (axis 0) and time frames (axis 2) -> leaves shape (1, C, 1, F)
+        sum_x = x.sum(axis=(0, 2), keepdims=True)
+        sum_x2 = np.square(x).sum(axis=(0, 2), keepdims=True)
+
+        if total is None:
+            total = sum_x
+            total_sq = sum_x2
+        else:
+            total += sum_x
+            total_sq += sum_x2
+
+        total_frames += x.shape[0] * x.shape[2]  # N_windows * T
+
+    if total_frames == 0 or total is None:
+        raise ValueError("No valid window data found to compute normalization statistics.")
+
+    # Calculate per-subcarrier mean and standard deviation
+    mean = total / total_frames
+    variance = (total_sq / total_frames) - np.square(mean)
+    std = np.sqrt(np.maximum(variance, 1e-12))
+    std = np.maximum(std, 1e-6)  # Guard against division by zero for silent/flat subcarriers
+
+    # Convert to PyTorch tensors with shape (1, C, 1, F)
+    mean_tensor = torch.tensor(mean, dtype=torch.float32)
+    std_tensor = torch.tensor(std, dtype=torch.float32)
+
+    return mean_tensor, std_tensor
 
 
 def evaluate(model, loader, criterion, device):
