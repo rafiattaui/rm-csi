@@ -174,7 +174,13 @@ class SingleReceiverCNN(nn.Module):
 # ----------------------------------------------------------------------------
 
 def parse_int_list(value):
-    return [int(p.strip()) for p in value.split(",")] if value else None
+    if not value:
+        return None
+    out = []
+    for p in value.split(","):
+        p = p.strip()
+        out.append(int(p) if p.isdigit() else ord(p.upper()) - ord("A"))
+    return out
 
 
 def set_seed(seed):
