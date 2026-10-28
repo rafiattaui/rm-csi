@@ -312,17 +312,27 @@ def split_intra_subject_recordings(samples, train_frac=0.70, val_frac=0.15, seed
     for group in grouped.values():
         rng.shuffle(group)
         n_total = len(group)
-        n_train = max(1, int(round(n_total * train_frac)))
-        n_val = max(1, int(round(n_total * val_frac)))
         
-        # Ensure we don't overflow the list boundaries
-        if n_train + n_val >= n_total:
-            n_val = max(1, (n_total - n_train) // 2)
+        if n_total == 1:
+            # Fallback for single-sample groups: assign to train to avoid empty splits
+            train_paths.add(str(group[0]["m1_path"]))
+        elif n_total == 2:
+            train_paths.add(str(group[0]["m1_path"]))
+            val_paths.add(str(group[1]["m1_path"]))
+        else:
+            n_train = max(1, int(round(n_total * train_frac)))
+            n_val = max(1, int(round(n_total * val_frac)))
             
-        train_paths.update(str(s["m1_path"]) for s in group[:n_train])
-        val_paths.update(str(s["m1_path"]) for s in group[n_train:n_train + n_val])
-        test_paths.update(str(s["m1_path"]) for s in group[n_train + n_val:])
-        
+            # Ensure boundaries don't overflow
+            if n_train + n_val >= n_total:
+                n_val = max(1, n_total - n_train)
+                if n_train + n_val > n_total:
+                    n_train = max(1, n_total - n_val)
+            
+            train_paths.update(str(s["m1_path"]) for s in group[:n_train])
+            val_paths.update(str(s["m1_path"]) for s in group[n_train:n_train + n_val])
+            test_paths.update(str(s["m1_path"]) for s in group[n_train + n_val:])
+            
     return train_paths, val_paths, test_paths
 
 def prepare_datasets(args, device):
