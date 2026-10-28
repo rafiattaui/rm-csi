@@ -29,8 +29,9 @@ NUM_CLASSES = 20
 class SingleReceiverCSIDataset(Dataset):
     """Loads preprocessed CSI windows from a single receiver."""
 
-    def __init__(self, root, activities=None, samples=None, cache_recordings=2, is_train=False, channel=0, use_both_channels=True):
+    def __init__(self, root, activities=None, samples=None, cache_recordings=2, is_train=False, channel=0, use_both_channels=True, demean=False):
         self.root = Path(root)
+        self.demean = demean   # subtract each window's time-mean: keeps motion, drops the static level
         self.cache_recordings = max(0, int(cache_recordings))
         self.normalization = None
         self.is_train = is_train
@@ -100,6 +101,9 @@ class SingleReceiverCSIDataset(Dataset):
 
         if self.cache_recordings > 0 and len(self._cache) > self.cache_recordings:
             self._cache.pop(next(iter(self._cache)))
+
+        if self.demean:
+            x = x - x.mean(dim=1, keepdim=True)   # (C, T, F): remove mean over time per subcarrier
 
         if self.normalization is not None:
             mean, std = self.normalization  # Shapes: (1, C, 1, F)
@@ -216,6 +220,8 @@ def compute_train_normalization(dataset):
             if sample.get("idx") is not None:
                 w = w[sample["idx"]]
             x = w[:, ch_slice].astype(np.float64)
+            if getattr(dataset, "demean", False):
+                x = x - x.mean(axis=2, keepdims=True)   # same transform as in __getitem__
 
         if x.size == 0:
             continue
@@ -389,7 +395,7 @@ def prepare_datasets(args):
 
     def build(s, train):
         return SingleReceiverCSIDataset(args.data_dir, samples=s, cache_recordings=args.cache_recordings,
-                                        is_train=train, channel=args.channel)
+                                        is_train=train, channel=args.channel, demean=args.demean)
 
     return build(train_samples, True), build(val_samples, False), build(test_samples, False), mode
 
@@ -403,6 +409,8 @@ def main():
     parser.add_argument("--val-subjects", default=None, help="Comma-separated subject IDs for validation (cross-subject mode).")
     parser.add_argument("--recording-split", action="store_true",
                         help="Hold out whole recordings instead of the default window-level block split.")
+    parser.add_argument("--demean", action="store_true",
+                        help="Subtract each window's mean over time (motion-only input, no static level).")
     parser.add_argument("--block", type=int, default=20, help="Windows per block in the window-level split.")
     parser.add_argument("--gap", type=int, default=1, help="Windows dropped at split edges (overlap guard).")
     parser.add_argument("--cache-recordings", type=int, default=10000)
