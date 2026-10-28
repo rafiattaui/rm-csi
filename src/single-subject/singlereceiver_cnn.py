@@ -143,7 +143,7 @@ class SingleReceiverCNN(nn.Module):
             conv_block(width, width * 4),              # (B, 4w, T/4, F/4)
             conv_block(width * 4, width * 8, pool=False),
         )
-        self.freq_pool = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool = nn.AdaptiveAvgPool2d((None, 1))
         self.temporal_classifier = nn.Sequential(
             nn.Conv1d(width * 8, width * 4, kernel_size=5, padding=2),
             nn.BatchNorm1d(width * 4),
