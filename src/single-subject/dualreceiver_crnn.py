@@ -298,60 +298,34 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, num_epochs):
 
     return running_loss / total, correct / total
 
-def split_intra_subject_recordings(samples, train_frac=0.70, val_frac=0.15, seed=42):
-    rng = random.Random(seed)
-    
-    # Group by (Activity, Subject) to ensure stratified splitting across all people and actions
-    grouped = {}
-    for sample in samples: 
-        key = (sample["activity_id"], sample["subject"])
-        grouped.setdefault(key, []).append(sample)
-        
-    train_paths, val_paths, test_paths = set(), set(), set()
-    
-    for group in grouped.values():
-        rng.shuffle(group)
-        n_total = len(group)
-        
-        if n_total == 1:
-            # Fallback for single-sample groups: assign to train to avoid empty splits
-            train_paths.add(str(group[0]["m1_path"]))
-        elif n_total == 2:
-            train_paths.add(str(group[0]["m1_path"]))
-            val_paths.add(str(group[1]["m1_path"]))
-        else:
-            n_train = max(1, int(round(n_total * train_frac)))
-            n_val = max(1, int(round(n_total * val_frac)))
-            
-            # Ensure boundaries don't overflow
-            if n_train + n_val >= n_total:
-                n_val = max(1, n_total - n_train)
-                if n_train + n_val > n_total:
-                    n_train = max(1, n_total - n_val)
-            
-            train_paths.update(str(s["m1_path"]) for s in group[:n_train])
-            val_paths.update(str(s["m1_path"]) for s in group[n_train:n_train + n_val])
-            test_paths.update(str(s["m1_path"]) for s in group[n_train + n_val:])
-            
-    return train_paths, val_paths, test_paths
-
 def prepare_datasets(args, device):
     all_data = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, activities=parse_int_list(args.activities))
     
-    # Generate the 3-way intra-subject split
-    train_paths, val_paths, test_paths = split_intra_subject_recordings(all_data.samples, seed=args.seed)
+    # Global randomized 70 / 15 / 15 split with safety guards against empty sets
+    rng = random.Random(args.seed)
+    samples = list(all_data.samples)
+    rng.shuffle(samples)
     
-    def filter_samples(paths_set): 
-        return [s for s in all_data.samples if str(s["m1_path"]) in paths_set]
+    n_total = len(samples)
+    n_train = max(1, int(n_total * 0.70))
+    n_val = max(1, int(n_total * 0.15))
     
-    train_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=filter_samples(train_paths), cache_recordings=args.cache_recordings, is_train=True)
-    val_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=filter_samples(val_paths), cache_recordings=args.cache_recordings, is_train=False)
-    test_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=filter_samples(test_paths), cache_recordings=args.cache_recordings, is_train=False)
+    train_samples = samples[:n_train]
+    val_samples = samples[n_train:n_train + n_val]
+    test_samples = samples[n_train + n_val:]
     
-    # We return "All Subjects" for the logging printouts
+    # Safety fallback: ensure val and test sets are never empty if dataset is small
+    if not val_samples and len(train_samples) > 1:
+        val_samples.append(train_samples.pop())
+    if not test_samples and len(train_samples) > 1:
+        test_samples.append(train_samples.pop())
+    
+    train_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=train_samples, cache_recordings=args.cache_recordings, is_train=True)
+    val_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=val_samples, cache_recordings=args.cache_recordings, is_train=False)
+    test_ds = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, samples=test_samples, cache_recordings=args.cache_recordings, is_train=False)
+    
     all_subjects = sorted({s["subject"] for s in all_data.samples})
-    return train_ds, val_ds, test_ds, all_subjects, all_subjects, all_subjects, "Intra-subject (Same-Subject) split"
-
+    return train_ds, val_ds, test_ds, all_subjects, all_subjects, all_subjects, "Intra-subject (Randomized) split"
 
 def main():
     parser = argparse.ArgumentParser()
