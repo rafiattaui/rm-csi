@@ -223,15 +223,9 @@ def compute_train_normalization(dataset):
     sums, sums_sq, count = np.zeros(2, dtype=np.float64), np.zeros(2, dtype=np.float64), 0
     for sample in dataset.samples:
         with np.load(sample["m1_path"], allow_pickle=False) as d1, np.load(sample["m2_path"], allow_pickle=False) as d2:
-            # Grab the matching length we previously calculated
-            min_len = sample["n_windows"]
-            
-            # Slice both arrays to the exact same length before extracting amplitude
-            x1 = np.asarray(d1["windows"][:min_len, 0:1, :, :], dtype=np.float32)
-            x2 = np.asarray(d2["windows"][:min_len, 0:1, :, :], dtype=np.float32)
-            
+            x1 = np.asarray(d1["windows"][:, 0:1, :, :], dtype=np.float32)
+            x2 = np.asarray(d2["windows"][:, 0:1, :, :], dtype=np.float32)
             x = np.concatenate([x1, x2], axis=1)
-            
         if x.size == 0: continue
         sums += x.sum(axis=(0, 2, 3), dtype=np.float64)
         sums_sq += np.square(x, dtype=np.float64).sum(axis=(0, 2, 3), dtype=np.float64)
