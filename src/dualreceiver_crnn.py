@@ -288,7 +288,7 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch, num_epochs):
     return running_loss / total, correct / total
 
 def prepare_datasets(args, device):
-    all_data = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, device=args.csi_device, activities=parse_int_list(args.activities))
+    all_data = DualReceiverCSIDataset(args.m1_dir, args.m2_dir, device=device, activities=parse_int_list(args.activities))
     all_subjects = sorted({s["subject"] for s in all_data.samples})
     
     test_subjects = parse_int_list(args.test_subjects) or [all_subjects[-1]]
